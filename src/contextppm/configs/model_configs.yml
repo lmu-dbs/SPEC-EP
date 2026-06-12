@@ -1,0 +1,58 @@
+base_config:
+  max_pattern_size_train: [21]
+  max_pattern_size_eval: [[13]]
+  process_stage_width_percentage: [0.00]
+  min_freq: [0.000000000000001]
+  task: [['nap', 'rtp']]
+  break_buffer: [1.2]
+  filter_sequences: [True]
+  prune_func: [None]
+
+exhaustive_config:
+  max_pattern_size_train: [21]
+  max_pattern_size_eval: [[3,5,7,11,17,21]]
+  process_stage_width_percentage: [0.00, 0.025, 0.10, 0.20, 0.50, 1.00]
+  min_freq: [0.000000000000001]
+  task: [['nap', 'rtp']]
+  break_buffer: [1.2]
+  filter_sequences: [True]
+  prune_func: [None]
+
+contextppm_exhaustive_config:
+  max_pattern_size_train: [21]
+  max_pattern_size_eval: [[3,21]]
+  process_stage_width_percentage: [1.00]
+  min_freq: [0.0001]
+  task: [['nep', 'sfx']]
+  break_buffer: [1.2]
+  filter_sequences: [True]
+  clustering_type: [KMeans, GaussianMixture] # GaussianMixture or KMeans
+  cluster_params:
+    n_clusters: [100, 50, 10, 1]
+    random_state: [42]
+
+test_config:
+  max_pattern_size_train: [21]
+  max_pattern_size_eval: [[9]]
+  process_stage_width_percentage: [0.025]
+  min_freq: [0.0001]
+  task: [['nep', 'sfx']]
+  break_buffer: [1.2]
+  filter_sequences: [True]
+  clustering_type: [KMeans] # GaussianMixture or KMeans
+  cluster_params:
+    n_clusters: [10]
+    random_state: [42]
+
+explainability_config:
+  max_pattern_size_train: [21]
+  max_pattern_size_eval: [[21]]
+  process_stage_width_percentage: [1.00]
+  min_freq: [0.000000000000001]
+  task: [['sfx']]
+  break_buffer: [1.2]
+  filter_sequences: [True]
+  clustering_type: [KMeans] # GaussianMixture or KMeans
+  cluster_params:
+    n_clusters: [10]
+    random_state: [42]
