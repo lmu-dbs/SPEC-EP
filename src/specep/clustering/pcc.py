@@ -1,9 +1,9 @@
 import numpy as np
-from ..dataset.ECDataset import ECDataset
+from ..dataset.ecdataset import ECDataset
 from ..util.logging import init_logging
-from ..clustering.util import ECFactory
+from .util import ECFactory
 
-logger = init_logging(__name__, "PCClustering.log")
+logger = init_logging(__name__, "pcc.log")
 
 class ProcessContextClustering():
 
@@ -72,8 +72,8 @@ class ProcessContextClustering():
         # CAUTION
         # this is dangerous in case we do not have full timestamp information!
         # we would peak into the future timestamps if we have NAN timestamps in the middle of traces
-        self.data_train.data[self.data_train.timestamp_identifier] = self.data_train.data.groupby(self.data_train.case_identifier)[self.data_train.timestamp_identifier].ffill()
-        self.data_train.data[self.data_train.timestamp_identifier] = self.data_train.data.groupby(self.data_train.case_identifier)[self.data_train.timestamp_identifier].bfill()
+        self.data_train.data.loc[:, self.data_train.timestamp_identifier] = self.data_train.data.groupby(self.data_train.case_identifier)[self.data_train.timestamp_identifier].ffill()
+        self.data_train.data.loc[:, self.data_train.timestamp_identifier] = self.data_train.data.groupby(self.data_train.case_identifier)[self.data_train.timestamp_identifier].bfill()
         
         # generating time features
         # TSLE: time since last event
@@ -109,8 +109,8 @@ class ProcessContextClustering():
         # CAUTION
         # this is dangerous in case we do not have full timestamp information!
         # we would peak into the future timestamps if we have NAN timestamps in the middle of traces
-        self.data_test.data[self.data_test.timestamp_identifier] = self.data_test.data.groupby(self.data_test.case_identifier)[self.data_test.timestamp_identifier].ffill()
-        self.data_test.data[self.data_test.timestamp_identifier] = self.data_test.data.groupby(self.data_test.case_identifier)[self.data_test.timestamp_identifier].bfill()
+        self.data_test.data.loc[:, self.data_test.timestamp_identifier] = self.data_test.data.groupby(self.data_test.case_identifier)[self.data_test.timestamp_identifier].ffill()
+        self.data_test.data.loc[:, self.data_test.timestamp_identifier] = self.data_test.data.groupby(self.data_test.case_identifier)[self.data_test.timestamp_identifier].bfill()
 
         # generating time features
         # TSLE: time since last event

@@ -1,0 +1,11 @@
+# dataset: [EnvPermit, Helpdesk, Sepsis, BPI2013_Closed, BPI2013_Incidents, BPI2012_C, BPI2012_WC, BPI2012_Full, BPI2012_W, Nasa]
+dataset: [Helpdesk]
+model_config: test_config
+cv_folds: 5
+ncores: 4
+train_pct: 0.8 # if cv_folds: 1 train_pct specifies the percentage of cases used for training. remaining cases are the test cases
+seed: 42
+parallelization_lib: multiprocessing  # joblib or multiprocessing - might have effects regarding worker spin-up times depending on 
+                                      # the OS (multiprocessing might lead to increased worker spin-up times during prediction on 
+                                      # Windows machines) - larger datasets still experience increased worker spin-up times on 
+                                      # Windows machines - we advise to use UNIX based systems for faster parallel processing

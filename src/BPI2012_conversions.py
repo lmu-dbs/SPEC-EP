@@ -1,7 +1,7 @@
 import pandas as pd
 import os
-from contextppm.util.config_utils import read_config
-from contextppm.util.logging import init_logging
+from specep.util.config_utils import read_config
+from specep.util.logging import init_logging
 
 from util.paths import CONFIG_PATH, DATA_PATH
 

@@ -13,7 +13,7 @@ from ..encoding.util import EncodingFactory, TransformFactory
 
 from sklearn.preprocessing import LabelEncoder
 
-logger = init_logging(__name__, "ECDataset.log")
+logger = init_logging(__name__, "ecdataset.log")
 
 
 class ECDataset:
@@ -34,7 +34,7 @@ class ECDataset:
         self.timestamp_identifier = timestamp_identifier
 
         self.attribute_identifiers = None
-
+        
         self.logger.info("Recoding sequence data types...")
         self.recode_types()
 

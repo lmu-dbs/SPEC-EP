@@ -10,7 +10,7 @@ We provide a prediction framework SPEC-EP to efficiently forecast full future ev
 
 ## Setup
 
-We implemented our approach as a combination of two python modules (`contextppm` and the existing `best4ppm` [[R1]](#R1)) and provided an overall forecasting script to reproduce our experimental results.
+We implemented our approach as a combination of two python modules (`specep` and the existing `best4ppm` [[R1]](#R1)) and provided an overall forecasting script to reproduce our experimental results.
 To setup the environment for running our code, we provide a `pyproject.toml` file (requires python>=3.11) from which the needed dependencies can be gathered with `pip` via (execute from the project directory):
 
 `python -m pip install .`
@@ -21,7 +21,7 @@ or with [`poetry`](https://python-poetry.org/) via (execute from the project dir
 
 ## Usage
 
-The codebase consists of our module `contextppm` and the previously published module `best4ppm` ([link](https://github.com/lmu-dbs/BEST) to the repository) and different scripts for dataset manipulation (`BPI2012_conversions.py`), event log metric extraction (`log_characteristics.py`) and the experiments for the prediction of next activities, activity suffixes and accompanying event attributes (`event_clustering.py`).
+The codebase consists of our module `specep` and the previously published module `best4ppm` ([link](https://github.com/lmu-dbs/BEST) to the repository) and different scripts for dataset manipulation (`BPI2012_conversions.py`), event log metric extraction (`log_characteristics.py`) and the experiments for the prediction of next activities, activity suffixes and accompanying event attributes (`event_clustering.py`).
 
 We extend the config structure from BEST by additional parameters. The existing config files are `general_config.yml`, `model_configs.yml`, `data_configs.yml`.
 

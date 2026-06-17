@@ -9,12 +9,12 @@ from collections import Counter
 from best4ppm.data.sequencedata import SequenceData
 from best4ppm.models.best import BESTPredictor
 
-from contextppm.dataset.ECDataset import ECDataset
-from contextppm.util.config_utils import read_config
-from contextppm.clustering.ProcessContextClustering import ProcessContextClustering
-from contextppm.encoding.util import Decoding
+from specep.dataset.ecdataset import ECDataset
+from specep.util.config_utils import read_config
+from specep.clustering.pcc import ProcessContextClustering
+from specep.encoding.util import Decoding
 
-from contextppm.util.logging import init_logging
+from specep.util.logging import init_logging
 logger = init_logging(__name__, 'main.log')
 
 from util.paths import CONFIG_PATH, DATA_PATH, EXPORT_PATH
@@ -96,7 +96,9 @@ def main():
 
                     for fold_idx, (pcc, best) in enumerate(fold_models):
                         important_rules = extract_rules(pcc, best, k=3, min_n=10)
-                        important_rules.to_csv(os.path.join(EXPORT_PATH, f"important_rules_{additional_params['dataset']}_fold_{fold_idx}.csv"))
+                        rule_path = os.path.join(EXPORT_PATH, f"important_rules_{additional_params['dataset']}_fold_{fold_idx}.csv")
+                        important_rules.to_csv(rule_path)
+                        logger.info(f"Extracted important rules for fold {fold_idx} to: {os.path.abspath(rule_path)}")
                 
             else:
                 data_train, data_test = data.train_test_split(train_pct=general_config.get('train_pct'), cv=general_config.get('cv_folds'))
@@ -113,7 +115,9 @@ def main():
                 pcc, best = perform_run_train(data_train, data_test, model_params, times)
 
                 important_rules = extract_rules(pcc, best, k=3, min_n=10)
-                important_rules.to_csv(os.path.join(EXPORT_PATH, f"important_rules_{additional_params['dataset']}.csv"))
+                rule_path = os.path.join(EXPORT_PATH, f"important_rules_{additional_params['dataset']}.csv")
+                important_rules.to_csv(rule_path)
+                logger.info(f"Extracted important rules to: {os.path.abspath(rule_path)}")
 
                     
 def perform_run_train(data_train, data_test, model_params_train, times):
@@ -149,11 +153,11 @@ def perform_run_train(data_train, data_test, model_params_train, times):
     times['best_fitting_time_start'] = time.perf_counter()
 
     best.load_data(data_train_sd, data_test_sd)
-    best.prepare_train(contextppm=True)
+    best.prepare_train(specep=True)
     best.fit()
     best.prepare_test(act_encoder=data_train_sd.act_encoder, 
                       filter_sequences=model_params_train['filter_sequences'], 
-                      contextppm=True, attributes=data_train_sd.attribute_identifiers)
+                      specep=True, attributes=data_train_sd.attribute_identifiers)
 
     times['best_fitting_time_end'] = time.perf_counter()
 
@@ -164,6 +168,8 @@ def extract_rules(pcc, best, k = 3, min_n = 10):
     # constructing data frame of all patterns (mining for each branch at first level of tree)
     # patterns all show the same center activity context cluster pair for one branch
     # can be used to infer about effects of certain center activity context cluster pairs w.r.t. outcomes (last context clusters)
+
+    logger.info('Extracting important rules...')
 
     all_act_context_pairs = Counter([','.join([str(acp) for acp in p[0]]) for p in best._hca_patterns_by_size[1]])
     all_patterns_frame = pd.DataFrame()
@@ -304,6 +310,8 @@ def extract_rules(pcc, best, k = 3, min_n = 10):
                                                                                                                                      'lift_last_context_cluster'], 
                                                                                                                                  ascending=[True, False])
     important_rules['last_cluster_avg_case_duration'] = important_rules['last_context_cluster'].apply(lambda x: cluster_means_dict[cluster_inverse_remap_dict[x]])
+
+    logger.info('Rule extraction completed!')
 
     return important_rules
 

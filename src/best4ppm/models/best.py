@@ -1,20 +1,19 @@
 import numpy as np
 import pandas as pd
 import math
-import itertools
-import multiprocessing
+from multiprocessing import shared_memory, Process
+from joblib import Parallel, delayed
 import time
 import re
 from collections import Counter
 from tqdm import tqdm
 from enum import Enum
 from sklearn.preprocessing import LabelEncoder
-from concurrent.futures import ProcessPoolExecutor
 from ..data.sequencedata import SequenceData
 from ..util.sequence_utils import _get_pattern_center, _child_matches_with_sequence, _filter_start_end
 from ..util.logging import init_logging
 
-logger = init_logging(__name__, "BEST.log")
+logger = init_logging(__name__, "best.log")
 
 class MultipleContextInPaddingException(Exception):
     pass
@@ -28,7 +27,7 @@ class BESTPredictor():
     BEST is capable of predicting next activities as well as remaining traces for sequences of activities
     """
 
-    def __init__(self, max_pattern_size, process_stage_width_percentage, min_freq, prune_func):
+    def __init__(self, max_pattern_size, process_stage_width_percentage, min_freq, prune_func, parallelization_lib = 'joblib'):
 
         params = {'max_pattern_size':max_pattern_size,
                         'process_stage_width_percentage':process_stage_width_percentage,
@@ -53,6 +52,8 @@ class BESTPredictor():
         # length of chosen pattern in prediction tracker
         self.choice_tracker_nep = {'prob':[], 'len':[], 'dist':[]}
         self.choice_tracker_sfx = {'prob':[], 'len':[], 'dist':[]}
+        
+        self.parallelization_lib = parallelization_lib
         
     def fit(self) -> None:
         """Fitting the model to X (training data). This involves the pattern generation as well as matching
@@ -110,36 +111,78 @@ class BESTPredictor():
             raise ValueError(f'invalid task: {task} - only next event prediction (nep) and \
                                       suffix prediction (sfx) are valid tasks')
 
+        convert_start_time = time.perf_counter()
+        prefix_array = _build_prefix_array(self.data_test.relevant_prefixes)
+        pred_start_time = time.perf_counter()
+
         if task==Task.SFX:
             max_prefix_len = max([len(prefix['prefix']) for prefix in self.data_test.relevant_prefixes])
+            max_seq_len = int(break_buffer*max_prefix_len)
+            if ncores==1:
+                predicted_traces = np.array([lst + [np.nan] * (max_seq_len - len(lst)) for lst in [self._predict_sequence(eval_pattern_size=eval_pattern_size,
+                                                                                                                          prefix=row,
+                                                                                                                          break_after_seq_len=max_seq_len) for row in tqdm(prefix_array)]])
 
-            predicted_traces = list()
-            if ncores == 1:
-                for prefix in tqdm(self.data_test.relevant_prefixes):
-                    prefix_sequence = prefix['prefix']
-                    pred_sequence = self._predict_sequence(prefix=prefix_sequence, eval_pattern_size=eval_pattern_size,
-                                                        break_after_seq_len=break_buffer*max_prefix_len)
-                    
-                    predicted_traces.append(pred_sequence)
+
+
             else:
-                prefix_batches = [pb for pb in self._batch_prefixes(ncores)]
-                batch_lens = [len(b) for b in self._batch_prefixes(ncores)]
-                with multiprocessing.Manager() as manager:
-                    progress_dict = manager.dict({i: 0 for i in range(ncores)})
+                shm_input, shared_input, shm_result, shared_result = _setup_shared_memory(prefix_array, max_seq_len=max_seq_len)
 
-                    with ProcessPoolExecutor(max_workers=ncores) as executor:
-                        batch_predictions = [executor.submit(self._batch_predict_sequence, 
-                                                             eval_pattern_size, 
-                                                             prefix_batches[i], 
-                                                             break_buffer*max_prefix_len, 
-                                                             i,
-                                                             progress_dict) for i in range(ncores)]
-                        
-                        _progress_monitor(progress_dict, ncores, batch_lens)
+                # generating index slices according to number of workers (ncores)
+                chunksize = len(prefix_array) // ncores
+                slices = [
+                    (i * chunksize, (i + 1) * chunksize if i < ncores - 1 else len(prefix_array))
+                    for i in range(ncores)
+                ]
 
-                predicted_traces = list(itertools.chain(*[f.result() for f in batch_predictions]))
+                if self.parallelization_lib == 'joblib':
+                    t0 = time.perf_counter()
+                    try:
+                        Parallel(n_jobs=ncores)(
+                            delayed(self._shared_worker)(eval_pattern_size, i, task, shm_input.name, prefix_array.shape, prefix_array.dtype, s, e, max_seq_len, 
+                                shm_result.name, shared_result.shape, shared_result.dtype,)
+                            for i, (s, e) in enumerate(slices)
+                        )
+                        elapsed = time.perf_counter() - t0
+                        predicted_traces = shared_result.copy()
+                    finally:
+                        for s in [shm_input, shm_result]:
+                            s.close()
+                            s.unlink()
+                            
+                elif self.parallelization_lib == 'multiprocessing':
+                    procs = [
+                        Process(
+                            target=self._shared_worker,
+                            args=(eval_pattern_size, i, task, shm_input.name, prefix_array.shape, prefix_array.dtype, s, e, max_seq_len, 
+                                shm_result.name, shared_result.shape, shared_result.dtype,
+                                )
+                        )
+                        for i, (s, e) in enumerate(slices)
+                    ]
 
-            predictions = predicted_traces
+                    t0 = time.perf_counter()
+                    try:
+                        for p in procs: p.start()
+                        for p in procs: p.join()
+                        for p in procs:
+                            if p.exitcode != 0:
+                                raise RuntimeError(f"Worker {p.pid} failed with exit code {p.exitcode}")
+                        elapsed = time.perf_counter() - t0
+                        predicted_traces = shared_result.copy()
+                    finally:
+                        for s in [shm_input, shm_result]:
+                            s.close()
+                            s.unlink()
+                else:
+                    raise ValueError('unknown parallelization method')
+                
+                logger.info(f"Workers done in {elapsed:.3f}s  |  {len(predicted_traces):,} prefixes processed")
+                logger.info(f"Total time elapsed: {time.perf_counter() - pred_start_time:.3f}s")
+
+            pred_duration = time.perf_counter() - pred_start_time
+
+            predictions = _reconvert_traces_from_shared_mem(predicted_traces)
 
             if filter_tokens:
                 filtered_predictions = list()
@@ -153,36 +196,79 @@ class BESTPredictor():
                 predictions = filtered_predictions
         
         elif task==Task.NEP:
-            predicted_activities = list()
+            
+            max_seq_len = 1
             
             if ncores==1:
-                for prefix in tqdm(self.data_test.relevant_prefixes):
-                    prefix_sequence = prefix['prefix']
-                    pred_activity = self._predict_activity(prefix=prefix_sequence,
-                                                           eval_pattern_size=eval_pattern_size)
-                    
-                    predicted_activities.append(pred_activity)
+                predicted_activities = np.array([self._predict_activity(eval_pattern_size=eval_pattern_size,
+                                                                        prefix=row) for row in tqdm(prefix_array)])
+
             else:
-                prefix_batches = [pb for pb in self._batch_prefixes(ncores)]
-                batch_lens = [len(b) for b in self._batch_prefixes(ncores)]
-                with multiprocessing.Manager() as manager:
-                    progress_dict = manager.dict({i: 0 for i in range(ncores)})
+                shm_input, shared_input, shm_result, shared_result = _setup_shared_memory(prefix_array, max_seq_len=max_seq_len)
 
-                    with ProcessPoolExecutor(max_workers=ncores) as executor:
-                        batch_predictions = [executor.submit(self._batch_predict_activity, 
-                                                             eval_pattern_size, 
-                                                             prefix_batches[i], 
-                                                             i,
-                                                             progress_dict) for i in range(ncores)]
-                        
-                        _progress_monitor(progress_dict, ncores, batch_lens)
+                # generating index slices according to number of workers (ncores)
+                chunksize = len(prefix_array) // ncores
+                slices = [
+                    (i * chunksize, (i + 1) * chunksize if i < ncores - 1 else len(prefix_array))
+                    for i in range(ncores)
+                ]
                 
-                predicted_activities = list(itertools.chain(*[f.result() for f in batch_predictions]))
+                if self.parallelization_lib == 'joblib':
+                    t0 = time.perf_counter()
+                    try:
+                        Parallel(n_jobs=ncores)(
+                            delayed(self._shared_worker)(eval_pattern_size, i, task, shm_input.name, prefix_array.shape, prefix_array.dtype, s, e, max_seq_len, 
+                                shm_result.name, shared_result.shape, shared_result.dtype,)
+                            for i, (s, e) in enumerate(slices)
+                        )
+                        elapsed = time.perf_counter() - t0
+                        predicted_activities = shared_result.copy()
+                    finally:
+                        for s in [shm_input, shm_result]:
+                            s.close()
+                            s.unlink()
+                            
+                elif self.parallelization_lib == 'multiprocessing':
+                    procs = [
+                        Process(
+                            target=self._shared_worker,
+                            args=(eval_pattern_size, i, task, shm_input.name, prefix_array.shape, prefix_array.dtype, s, e, max_seq_len, 
+                                shm_result.name, shared_result.shape, shared_result.dtype, 
+                                )
+                        )
+                        for i, (s, e) in enumerate(slices)
+                    ]
 
-            predictions = predicted_activities
+                    t0 = time.perf_counter()
+                    try:
+                        for p in procs: p.start()
+                        for p in procs: p.join()
+                        for p in procs:
+                            if p.exitcode != 0:
+                                raise RuntimeError(f"Worker {p.pid} failed with exit code {p.exitcode}")
+                        elapsed = time.perf_counter() - t0
+                        predicted_activities = shared_result.copy()
+                    finally:
+                        for s in [shm_input, shm_result]:
+                            s.close()
+                            s.unlink()
+                else:
+                    raise ValueError('unknown parallelization method')
 
+                logger.info(f"Workers done in {elapsed:.3f}s  |  {len(predicted_activities):,} prefixes processed")
+                logger.info(f"Total time elapsed: {time.perf_counter() - pred_start_time:.3f}s")
 
-        return predictions
+            pred_duration = time.perf_counter() - convert_start_time
+
+            if ncores > 1:
+                predictions = _reconvert_activities_from_shared_mem(predicted_activities)
+            else:
+                predictions = predicted_activities
+
+        pred_plus_convert_duration = time.perf_counter() - convert_start_time
+
+        return predictions, pred_duration, pred_plus_convert_duration
+
 
     def _predict_sequence(self, eval_pattern_size: int, prefix: list[int], break_after_seq_len: int = 10e5, verbose: bool = False) -> list[int]:
         """Predicts the remaining activities for a given prefix
@@ -193,7 +279,9 @@ class BESTPredictor():
         Returns:
            list[int]: the predicted sequence containing the prefix and the predicted remaining activities
         """    
-        predicted_sequence = prefix.copy()
+        predicted_sequence = [int(el) for el in prefix if not np.isnan(el)]
+        initial_prefix_len = len(predicted_sequence)
+
         try:
             last_start = len(predicted_sequence) - predicted_sequence[::-1].index(self.start_activity) - 1
         except ValueError as v_error:
@@ -254,22 +342,32 @@ class BESTPredictor():
 
             predicted_sequence.extend(current_prediction[1:]) # whole pattern is appended to the prediction
 
-        return predicted_sequence[len(prefix):]
+        return predicted_sequence[initial_prefix_len:]
     
-    def _batch_predict_sequence(self, eval_pattern_size, prefixes, break_after_seq_len, proc_id, progress_dict):
-        predicted_traces = list()
+    def _batch_predict_sequence(self, eval_pattern_size, prefixes, break_after_seq_len, worker_id, **kwargs):
+        
+        print_indices = [i for i in range(len(prefixes))][::max(1, int(len(prefixes) / 10))][1:] + [len(prefixes) - 1]
+
+        predicted_sequences = np.zeros((len(prefixes), break_after_seq_len))
+        predicted_sequences[:] = np.nan
+
         for prefix_idx, prefix in enumerate(prefixes):
-            prefix_sequence = prefix['prefix']
-            pred_sequence = self._predict_sequence(prefix=prefix_sequence,
-                                                   eval_pattern_size=eval_pattern_size,
-                                                   break_after_seq_len=break_after_seq_len)
-            progress_dict[proc_id] = prefix_idx + 1
+            pred_sequence = self._predict_sequence(eval_pattern_size=eval_pattern_size, 
+                                                   prefix=prefix, 
+                                                   break_after_seq_len=break_after_seq_len, 
+                                                   **kwargs)
             
-            predicted_traces.append(pred_sequence)
-        return predicted_traces
+            predicted_sequences[prefix_idx, :len(pred_sequence)] = pred_sequence
+
+            if prefix_idx in print_indices:
+                logger.info(f"worker {worker_id}: {prefix_idx} prefixes completed ({100*(prefix_idx+1)/len(prefixes):.2f}%)")
+
+        return predicted_sequences
 
 
-    def _predict_activity(self, eval_pattern_size: int, prefix: list[int], verbose: bool = False) -> int:
+
+    def _predict_activity(self, eval_pattern_size: int, prefix: list[int], break_after_seq_len: int = 1, verbose: bool = False) -> int:
+
         """Predicts the next activity for a given sequence
 
         Args:
@@ -279,7 +377,11 @@ class BESTPredictor():
             int: the predicted activity
         """
 
-        predicted_sequence = prefix.copy()
+        if break_after_seq_len != 1:
+            raise ValueError(f"break_after_seq_len should not be overridden - overridden with: {break_after_seq_len}")
+
+        predicted_sequence = [int(el) for el in prefix if not np.isnan(el)]
+
         try:
             last_start = len(predicted_sequence) - predicted_sequence[::-1].index(self.start_activity) - 1
         except ValueError as v_error:
@@ -337,24 +439,32 @@ class BESTPredictor():
                 self.choice_tracker_nep[choice_metric].append(pattern_attributes[choice_metric])
         return current_prediction[1]
 
-    def _batch_predict_activity(self, eval_pattern_size, prefixes, proc_id, progress_dict, **kwargs):
-        predicted_activities = list()
+    def _batch_predict_activity(self, eval_pattern_size, prefixes, break_after_seq_len, worker_id, **kwargs):
+
+        print_indices = [i for i in range(len(prefixes))][::max(1, int(len(prefixes) / 10))][1:] + [len(prefixes) - 1]
+
+        predicted_activities = np.zeros((len(prefixes), 1))
+        predicted_activities[:] = np.nan
+
         for prefix_idx, prefix in enumerate(prefixes):
-            prefix_sequence = prefix['prefix']
-            pred_activity = self._predict_activity(prefix=prefix_sequence, 
-                                                   eval_pattern_size=eval_pattern_size, 
+            pred_activity = self._predict_activity(eval_pattern_size=eval_pattern_size, 
+                                                   prefix=prefix, 
+                                                   break_after_seq_len=break_after_seq_len, 
                                                    **kwargs)
+
             
-            progress_dict[proc_id] = prefix_idx + 1
-            
-            predicted_activities.append(pred_activity)
+            predicted_activities[prefix_idx] = pred_activity
+
+            if prefix_idx in print_indices:
+                logger.info(f"worker {worker_id}: {prefix_idx} prefixes completed ({100*(prefix_idx+1)/len(prefixes):.2f}%)")
+
         return predicted_activities
         
     def load_data(self, train: SequenceData, test: SequenceData):
         self.data_train = train
         self.data_test = test
 
-    def prepare_train(self, contextppm: bool = False):
+    def prepare_train(self, specep: bool = False):
         
         logger.info('Preparing training data...')
         if self.data_train is None:
@@ -366,13 +476,13 @@ class BESTPredictor():
                       'n_pad':self._padding_size,
                       }
         
-        if contextppm:
+        if specep:
             self.data_train.activity_identifier = f"{self.data_train.activity_identifier}_context"
             pad_params.update({'cols_to_pad':[self.data_train.activity_identifier]})
         
         self.data_train.pad_columns(**pad_params)
-        act_idx = self.data_train.data.groupby(self.data_train.case_identifier).apply(lambda x: pd.Series(range(-(self._padding_size-int(contextppm)), 
-                                                                                          len(x)-(self._padding_size-int(contextppm)))))
+        act_idx = self.data_train.data.groupby(self.data_train.case_identifier).apply(lambda x: pd.Series(range(-(self._padding_size-int(specep)), 
+                                                                                          len(x)-(self._padding_size-int(specep)))))
         self.data_train.data['activity_idx'] = act_idx.reset_index(drop=True)
 
         # forward and backward fill timestamp column
@@ -391,7 +501,7 @@ class BESTPredictor():
 
         logger.info('Training data prepared!')
 
-    def prepare_test(self, act_encoder: LabelEncoder, filter_sequences: bool = True, contextppm: bool = False, attributes: list[str] = None):
+    def prepare_test(self, act_encoder: LabelEncoder, filter_sequences: bool = True, specep: bool = False, attributes: list[str] = None):
         
         logger.info('Preparing test data...')
         if self.data_test is None:
@@ -401,13 +511,13 @@ class BESTPredictor():
                       'n_pad':self._padding_size,
                       }
         
-        if contextppm:
+        if specep:
             self.data_test.activity_identifier = f"{self.data_test.activity_identifier}_context"
             pad_params.update({'cols_to_pad':[self.data_test.activity_identifier]})
         
         self.data_test.pad_columns(**pad_params)
-        act_idx = self.data_test.data.groupby(self.data_test.case_identifier).apply(lambda x: pd.Series(range(-(self._padding_size-int(contextppm)), 
-                                                                                          len(x)-(self._padding_size-int(contextppm)))))
+        act_idx = self.data_test.data.groupby(self.data_test.case_identifier).apply(lambda x: pd.Series(range(-(self._padding_size-int(specep)), 
+                                                                                          len(x)-(self._padding_size-int(specep)))))
         self.data_test.data['activity_idx'] = act_idx.reset_index(drop=True)
 
         # forward and backward fill timestamp column
@@ -699,6 +809,44 @@ class BESTPredictor():
 
         return matching_nodes
 
+    def _shared_worker(self, eval_pattern_size: int, 
+                       worker_id: int, task: str, shm_name: str, shape: tuple, dtype: np.dtype,
+                       start: int, end: int, max_seq_len: int, 
+                       res_shm_name: str, res_shape: tuple, res_shm_dtype: np.dtype,
+                       **kwargs):
+        # attach to input data
+        shm = shared_memory.SharedMemory(name=shm_name)
+        prefix_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+
+        # attach to results buffer
+        res_shm = shared_memory.SharedMemory(name=res_shm_name)
+        res = np.ndarray(res_shape, dtype=res_shm_dtype, buffer=res_shm.buf)
+
+        try: 
+            if task==Task.NEP:
+                result = self._batch_predict_activity(eval_pattern_size=eval_pattern_size, 
+                                                      prefixes=prefix_array[start:end], 
+                                                      break_after_seq_len=max_seq_len, 
+                                                      worker_id=worker_id,
+                                                      **kwargs)
+            elif task==Task.SFX:
+                result = self._batch_predict_sequence(eval_pattern_size=eval_pattern_size, 
+                                                      prefixes=prefix_array[start:end], 
+                                                      break_after_seq_len=max_seq_len, 
+                                                      worker_id=worker_id,
+                                                      **kwargs)
+
+            # write result to shared results buffer
+            res[start:end] = result
+
+        except Exception as e:
+            logger.error(f"something went wrong in worker {worker_id}")
+            raise
+
+        finally:
+            shm.close()
+            res_shm.close()
+
 def _get_matches_dict(pattern: tuple[int], all_matches: dict, max_pattern_size: int, min_k: int = None, max_k: int = None, min_freq: float = None) -> dict:
     """Recursive search of pattern matches given a starting pattern. For each match, we calculate the conditional probability
     (occurrence probability given the parent pattern). In each call we identify the matching patterns and execute the search
@@ -859,16 +1007,70 @@ def _rescale_probs(probs):
     probs = probs/sum(probs)
     return probs
 
-def _progress_monitor(progress_dict, num_workers, batch_lens, update_freq = 0.1):
-    """Monitoring dictionary to manage and display multiple progress bars updating in update_freq (sec)."""
-    bars = [tqdm(total=batch_len, position=i, desc=f"Batch {i+1}") for i, batch_len in zip(range(0, num_workers), batch_lens)]
+def _build_prefix_array(prefix_dict: dict):
+    """Builds array of prefixes of different length from list of prefixes. Pads shorter prefixes with np.nan from the left
+
+    Args:
+        prefix_dict (dict): list of prefixes
+    """
+
+    raw_prefixes = [prefix['prefix'] for prefix in prefix_dict]
+    prefix_lens = [len(prefix) for prefix in raw_prefixes]
+    max_prefix_len = max(prefix_lens)
+
+    prefix_array = np.empty((len(prefix_dict), max_prefix_len))
+    prefix_array[:] = np.nan
+
+    for prefix_idx, (prefix, prefix_len) in enumerate(zip(raw_prefixes, prefix_lens)):
+        prefix_array[prefix_idx, max_prefix_len-prefix_len:] = prefix
+
+    return prefix_array
+
+def _setup_shared_memory(data: np.ndarray, max_seq_len: int = None):
+    """Sets up shared memory objects (multiprocessing.shared_memory.SharedMemory) for input data and corresponding results
+    for multiple workers to work on
+
+    Args:
+        data (np.ndarray): prefix information in form of a left-padded np.ndarray
+    """
+    n_rows = len(data)
+
+    # generate shared memory for input data and fill it with the input data
+    shm_input = shared_memory.SharedMemory(create=True, size=data.nbytes)
+    shared_input = np.ndarray(data.shape, dtype=data.dtype, buffer=shm_input.buf)
+    shared_input[:] = data
+
+    # generate shared memory for results - one float per row
+    # shape depends on the task
+    #   NAP - single activities -> 1 float per row
+    #   RTP - full remaining traces -> n floats per row with max_seq_len as shape indicator
+    result_buffer = np.zeros((n_rows, max_seq_len), dtype=np.float64)
+    shm_result = shared_memory.SharedMemory(create=True, size=result_buffer.nbytes)
+    shared_result = np.ndarray(result_buffer.shape, dtype=result_buffer.dtype, buffer=shm_result.buf)
     
-    while any(p < batch_len for p, batch_len in zip(progress_dict.values(), batch_lens)):
-        time.sleep(update_freq)
-        for i in range(num_workers):
-            if bars[i].n < batch_lens[i]:
-                bars[i].n = progress_dict[i]
-                bars[i].refresh()
-    
-    for bar in bars:
-        bar.close()
+    return shm_input, shared_input, shm_result, shared_result
+
+def _reconvert_activities_from_shared_mem(predicted_activities: np.ndarray):
+
+    predicted_activities_list = list()
+    for pa in predicted_activities:
+        try:
+            converted_pa = int(pa)
+        except ValueError:
+            converted_pa = None
+        predicted_activities_list.append(converted_pa)
+
+    return predicted_activities_list
+
+def _reconvert_traces_from_shared_mem(predicted_traces: np.ndarray):
+
+    predicted_traces_list = list()
+    for pt in predicted_traces:
+        try:
+            relevant_trace = [pa for pa in pt if not np.isnan(pa)]
+            converted_pt = [int(pa) for pa in relevant_trace]                
+        except ValueError:
+            converted_pt = None
+        predicted_traces_list.append(converted_pt)
+
+    return predicted_traces_list

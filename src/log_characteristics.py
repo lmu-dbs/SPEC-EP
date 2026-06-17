@@ -1,5 +1,5 @@
-from contextppm.dataset.ECDataset import ECDataset
-from contextppm.util.config_utils import read_config
+from specep.dataset.ecdataset import ECDataset
+from specep.util.config_utils import read_config
 import os
 import yaml
 

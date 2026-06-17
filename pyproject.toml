@@ -1,5 +1,5 @@
 [project]
-name = "contextppm"
+name = "specep"
 version = "0.1.0"
 description = "This is a project for a PPM framework that employs an event clustering to capture the context of events in all additional event attributes. Those clusters can be used for PPM with subsequent transformation of clusters into the original space via reverse transformation / sampling."
 authors = []
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.poetry]
-packages = [{include = "contextppm", from = "src"}]
+packages = [{include = "specep", from = "src"}]
 
 
 [tool.poetry.group.dev.dependencies]

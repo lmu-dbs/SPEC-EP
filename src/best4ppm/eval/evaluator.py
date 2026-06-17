@@ -22,7 +22,7 @@ class Evaluator:
     
     def get_nan_share(self) -> float:
         
-        none_share = sum([pred is None for pred in self.pred_activity])/len(self.pred_activity)
+        none_share = sum([pred==self.unseen_token for pred in self.pred_activity])/len(self.pred_activity)
         return none_share
     
     def _batch_seqs(self, seqs: list[list[int]], nbatches: int):
